@@ -1,9 +1,9 @@
-# main.py
+# main.py - Atualizado para usar tf.data.Dataset
 import pandas as pd
 import tensorflow as tf
 from config import (
-    STANDARD_IMAGE_SIZE, INCEPTION_IMAGE_SIZE,
-    train_generator, validation_generator, test_generator, CLASS_WEIGHTS
+    STANDARD_IMAGE_SIZE, INCEPTION_IMAGE_SIZE, BATCH_SIZE, CLASS_WEIGHTS,
+    create_datasets
 )
 from modelos import (
     build_vgg16_model, build_inceptionv3_model, build_resnet50_model,
@@ -20,22 +20,14 @@ BUILD_FUNCTION_MAP = {
     'Custom_CNN': build_custom_cnn
 }
 
-def set_generator_target_size(size):
-    """Ajusta o target_size dos generators (requer que os generators estejam carregados)."""
-    if train_generator and validation_generator and test_generator:
-        train_generator.target_size = size
-        validation_generator.target_size = size
-        test_generator.target_size = size
-    else:
-        print("Erro: Os generators de dados não foram carregados corretamente (Verifique config.py)")
-    
 def main():
-    
-    # Executa a limpeza inicial e verifica se o ambiente está pronto
+
+    # Executa a limpeza inicial
     clean_session()
     
-    if not train_generator:
-        print("EXECUÇÃO INTERROMPIDA: Verifique o caminho DATASET_BASE_PATH no config.py.")
+    # Verifica se os pesos de classe foram calculados (indicando que os dados foram carregados)
+    if not CLASS_WEIGHTS:
+        print("EXECUÇÃO INTERROMPIDA: Falha no carregamento dos dados ou cálculo de pesos.")
         return
 
     model_names = ['VGG16', 'InceptionV3', 'ResNet50', 'EfficientNetB0', 'Custom_CNN']
@@ -46,7 +38,7 @@ def main():
         print(f"INICIANDO O PROCESSO COMPLETO PARA: {name}")
         print(f"=======================================================")
         
-        # 1. SETUP: Determinar o tamanho da imagem e builder
+        # 1. SETUP: Determinar o tamanho da imagem
         if name == 'InceptionV3':
             current_image_size = INCEPTION_IMAGE_SIZE
         else:
@@ -54,24 +46,29 @@ def main():
             
         model_builder = BUILD_FUNCTION_MAP[name]
             
-        # 2. CONFIGURAR GENERATORS:
-        set_generator_target_size(current_image_size)
+        # 2. CONFIGURAR DATASETS: Recriar os Datasets com o tamanho correto
+        current_train_ds, current_val_ds, current_test_ds, class_names = create_datasets(current_image_size, BATCH_SIZE)
+        
+        if current_train_ds is None:
+            print(f"Pulando {name} devido a erro no carregamento do dataset.")
+            continue
 
         # 3. CONSTRUIR O MODELO:
-        model = model_builder()
+        input_shape = current_image_size + (3,)
+        model = model_builder(input_shape=input_shape)
 
         # 4. TREINAR O MODELO (25 épocas total):
         if name == 'Custom_CNN':
             trained_model, total_time = train_model(
-                model, train_generator, validation_generator, CLASS_WEIGHTS, name, epochs_transfer=0, epochs_finetune=25
+                model, current_train_ds, current_val_ds, CLASS_WEIGHTS, name, epochs_transfer=0, epochs_finetune=25
             )
         else:
             trained_model, total_time = train_model(
-                model, train_generator, validation_generator, CLASS_WEIGHTS, name, epochs_transfer=10, epochs_finetune=15
+                model, current_train_ds, current_val_ds, CLASS_WEIGHTS, name, epochs_transfer=10, epochs_finetune=15
             )
 
         # 5. AVALIAR O MODELO E COLETAR RESULTADOS:
-        results = evaluate_model(trained_model, test_generator, name, total_time)
+        results = evaluate_model(trained_model, current_test_ds, name, total_time, class_names)
         all_results[name] = results
         
         # 6. LIMPEZA:
