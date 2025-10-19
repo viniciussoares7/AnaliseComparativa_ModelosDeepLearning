@@ -1,4 +1,8 @@
 # Ignorar pastas Jute_Pest_Dataset e venv_tcc
 Jute_Pest_Dataset/
 venv_tcc/
+# Ignora a pasta completa 'Modelos' onde são salvos os modelos finais (.h5)
 Modelos/
+
+# Ignora os arquivos de checkpoint temporários salvos na raiz durante o treino
+*_best_model.h5
