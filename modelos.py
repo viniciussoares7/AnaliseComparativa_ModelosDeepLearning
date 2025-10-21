@@ -11,11 +11,15 @@ from tensorflow.keras.layers import Dense, Dropout, GlobalAveragePooling2D, Flat
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.applications import VGG16, InceptionV3, ResNet50, EfficientNetB0
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint
+from tensorflow.keras.utils import get_file
 import gc
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.metrics import confusion_matrix
 
 # Importar configurações e constantes
 from config import (
-    STANDARD_IMAGE_SIZE, INCEPTION_IMAGE_SIZE, NUM_CLASSES, MODELS_DIR
+    STANDARD_IMAGE_SIZE, INCEPTION_IMAGE_SIZE, NUM_CLASSES, MODELS_DIR,PLOTS_DIR,CLASS_WEIGHTS,MODEL_CONFIGS
 )
 
 # ===================================================================
@@ -27,44 +31,50 @@ def clean_session():
     tf.keras.backend.clear_session()
     gc.collect()
 
-def add_classifier_head(base_model, num_classes=NUM_CLASSES, dropout_rate=0.5, custom_inputs=None):
-    """ Adiciona o classificador (camadas densas) ao modelo base congelado. """
+def add_classifier_head(x_features_input, num_classes, dropout_rate=0.5):
+    """ 
+    Recebe o tensor de FEATURES (saída da última camada conv do modelo base) 
+    e anexa a cabeça do classificador (Pooling e Camadas Densas).
+    Retorna o tensor de predições.
+    """
     
-    # Congela o modelo base
-    for layer in base_model.layers:
-        layer.trainable = False
-        
-    x = base_model.output
-    x = GlobalAveragePooling2D()(x)
+    # 1. Aplica o Pooling no mapa de features
+    x = GlobalAveragePooling2D()(x_features_input)
+    
+    # 2. Camada Densa 1 (Hidden Layer)
     x = Dense(512, activation='relu')(x)
     x = Dropout(dropout_rate)(x)
-    predictions = Dense(num_classes, activation='softmax')(x)
     
-    # Constrói o modelo completo (Input -> Rescaling -> Base Model -> Head)
-    if custom_inputs is not None:
-        model = Model(inputs=custom_inputs, outputs=predictions, name=base_model.name)
-    else:
-        model = Model(inputs=base_model.input, outputs=predictions, name=base_model.name)
-
-    return model
+    # 3. Camada de Saída (Predictions)
+    predictions = Dense(num_classes, activation='softmax')(x) 
+    
+    # Agora, a função retorna APENAS o tensor de saída.
+    return predictions
 
 def create_model_with_rescaling(base_model_class, input_shape, model_name):
-    """ 
-    Função helper para construir modelos de Transfer Learning.
-    Cria uma nova instância de Rescaling com nome único para cada modelo.
-    """
-    inputs = Input(shape=input_shape)
-
-    # CORREÇÃO: Cria uma NOVA instância de Rescaling com nome único para este modelo
-    rescale_layer_unique = layers.Rescaling(
-        scale=1.0/255, 
-        name=f"rescaling_{model_name}" # Nome Único (ex: rescaling_EfficientNetB0)
-    )
-    x = rescale_layer_unique(inputs)
     
-    # Garante que o input_tensor seja o 'x' normalizado
-    base_model = base_model_class(weights='imagenet', include_top=False, input_tensor=x)
-    return add_classifier_head(base_model, custom_inputs=inputs)
+    inputs = Input(shape=input_shape)
+    rescale_layer_unique = layers.Rescaling(scale=1.0/255, name=f"rescaling_{model_name}")
+    x_normalized = rescale_layer_unique(inputs) 
+    
+    # 1. Constrói o modelo base (a espinha dorsal).
+    base_model = base_model_class(
+        weights=None,
+        include_top=False, 
+        input_tensor=x_normalized, 
+        input_shape=input_shape
+    )
+    
+    # 2. CAPTURA A SAÍDA do modelo base. Este é o tensor de FEATURES.
+    x_features = base_model.output 
+    
+    # 3. Adiciona a cabeça classificadora usando o tensor de FEATURES.
+    predictions = add_classifier_head(x_features, num_classes=NUM_CLASSES)
+    
+    # 4. Define e retorna o modelo final.
+    model = Model(inputs=inputs, outputs=predictions, name=model_name) 
+    
+    return model
 
 # ===================================================================
 # 2. MÉTODOS DE CONSTRUÇÃO DE MODELOS (Builders)
@@ -87,36 +97,46 @@ def build_efficientnetb0_model(input_shape=STANDARD_IMAGE_SIZE + (3,)):
     return create_model_with_rescaling(EfficientNetB0, input_shape, 'EfficientNetB0')
 
 def build_custom_cnn(input_shape=STANDARD_IMAGE_SIZE + (3,)):
-    """ Constrói a Rede Neural Convolucional Personalizada (CNN). """
+    """ Constrói a Rede Neural Convolucional Personalizada (CNN) otimizada. """
+
     model = Sequential(name='Custom_CNN')
 
     # Adicionar a camada de normalização primeiro!
     model.add(Input(shape=input_shape))
-    # CORREÇÃO: Cria uma NOVA instância de Rescaling com nome único
     model.add(layers.Rescaling(1./255, name='rescaling_custom_cnn'))
     
     # Bloco 1
-    model.add(Conv2D(32, (3, 3), activation='relu'))
+    model.add(Conv2D(32, (3, 3), activation='relu', padding='same'))
     model.add(BatchNormalization())
     model.add(MaxPooling2D((2, 2)))
-    model.add(Dropout(0.25))
 
     # Bloco 2
-    model.add(Conv2D(64, (3, 3), activation='relu'))
+    model.add(Conv2D(64, (3, 3), activation='relu', padding='same'))
     model.add(BatchNormalization())
     model.add(MaxPooling2D((2, 2)))
-    model.add(Dropout(0.25))
 
     # Bloco 3
-    model.add(Conv2D(128, (3, 3), activation='relu'))
+    model.add(Conv2D(128, (3, 3), activation='relu', padding='same'))
     model.add(BatchNormalization())
     model.add(MaxPooling2D((2, 2)))
-    model.add(Dropout(0.25))
+    
+    # Bloco 4 (NOVO)
+    model.add(Conv2D(256, (3, 3), activation='relu', padding='same'))
+    model.add(BatchNormalization())
+    model.add(MaxPooling2D((2, 2)))
 
     # Classificador
     model.add(Flatten())
+    
+    # Camada Densa 1
     model.add(Dense(512, activation='relu'))
     model.add(Dropout(0.5))
+    
+    # Camada Densa 2 (NOVO)
+    model.add(Dense(256, activation='relu'))
+    model.add(Dropout(0.3))
+    
+    # Saída
     model.add(Dense(NUM_CLASSES, activation='softmax'))
 
     return model
@@ -125,129 +145,208 @@ def build_custom_cnn(input_shape=STANDARD_IMAGE_SIZE + (3,)):
 # 3. MÉTODOS DE TREINAMENTO, CACHE E AVALIAÇÃO
 # ===================================================================
 
-def get_callbacks(model_name):
-    """ Retorna a lista de callbacks otimizados, salvando pesos na raiz temporariamente. """
-    # O ModelCheckpoint salva apenas os pesos (h5), permitindo que a função principal carregue.
+def get_callbacks(model_name,patience=10):
+    """ Retorna a lista de callbacks otimizados, salvando APENAS pesos (H5). """
+    filepath = f'{model_name}_best_model.weights.h5'
+
     return [
-        EarlyStopping(monitor='val_loss', patience=8, restore_best_weights=True),
-        ReduceLROnPlateau(monitor='val_loss', factor=0.3, patience=5, min_lr=1e-6),
-        ModelCheckpoint(f'{model_name}_best_model.h5', monitor='val_loss', save_best_only=True)
+        EarlyStopping(monitor='val_loss', patience=patience, restore_best_weights=True),
+        ReduceLROnPlateau(monitor='val_loss', factor=0.3, patience=int(patience/2), min_lr=1e-6),
+        ModelCheckpoint(
+            filepath, 
+            monitor='val_loss', 
+            save_best_only=True,
+            save_weights_only=True, 
+        )
     ]
 
-def train_model(model, train_ds, val_ds, class_weights, model_name, epochs_transfer=10, epochs_finetune=15):
-    """
-    Função principal para treinar o modelo em duas fases ou treinamento único (CNN).
-    """
+def train_model(model, train_ds, val_ds, class_weights, model_name):
     
-    callbacks = get_callbacks(model_name)
-    total_training_time = 0.0
+    start_time = time.time()
+    
+    # 1. Obter a configuração específica do modelo
+    config = MODEL_CONFIGS.get(model_name, MODEL_CONFIGS['VGG16']) 
 
-    # ----------------------------------------------------
-    # FASE 1: Transfer Learning (Treinar Camadas Finais)
-    # ----------------------------------------------------
-    if epochs_transfer > 0 and model_name != 'Custom_CNN':
+    epochs_transfer = config['epochs_transfer']
+    epochs_finetune = config['epochs_finetune']
+    initial_lr = config['initial_lr']
+    patience = config['patience']
+    unfreeze_layers_count = config['unfreeze_layers_count']
+    
+    # Obter os Callbacks com a paciência específica
+    callbacks_list = get_callbacks(model_name, patience=patience)
+
+    history = None
+
+    # --- FASE 1: Transfer Learning (Camadas Congeladas) ---
+    if epochs_transfer > 0:
         print(f"\n--- {model_name}: FASE 1: Transfer Learning (Camadas Congeladas) ---")
+        
+        # Congelar todas as camadas do modelo base
+        model.trainable = True 
+        for layer in model.layers[:-len(model.layers[-1].weights)]:
+            layer.trainable = False 
+
+        # Compilação da Fase 1 (Learning Rate Inicial)
         model.compile(
-            optimizer=Adam(learning_rate=1e-4),
-            loss='categorical_crossentropy',
+            optimizer=tf.keras.optimizers.Adam(learning_rate=initial_lr),
+            loss=tf.keras.losses.CategoricalCrossentropy(),
             metrics=['accuracy']
         )
         
-        start_time_transfer = time.time()
-        model.fit(
-            train_ds, epochs=epochs_transfer, validation_data=val_ds,
-            class_weight=class_weights, callbacks=callbacks, verbose=1
+        # Treinamento da Fase 1
+        history = model.fit(
+            train_ds,
+            epochs=epochs_transfer,
+            validation_data=val_ds,
+            callbacks=callbacks_list,
+            class_weight=class_weights,
+            verbose=1
         )
-        total_training_time += (time.time() - start_time_transfer)
         
-        try:
-            model.load_weights(f'{model_name}_best_model.h5')
-        except:
-            print(f"⚠️ Aviso: Não foi possível carregar os pesos da Fase 1 para {model_name}. Continuando...")
-
-
-    # ----------------------------------------------------
-    # FASE 2: Fine-Tuning (Descongelar Camadas) ou CNN (Treinamento Único)
-    # ----------------------------------------------------
-    
-    if model_name != 'Custom_CNN' and epochs_finetune > 0:
+    # --- FASE 2: Fine-Tuning (Descongelando Camadas) ---
+    if epochs_finetune > 0:
         print(f"\n--- {model_name}: FASE 2: Fine-Tuning (Descongelando Camadas) ---")
         
-        unfreeze_map = {'VGG16': 16, 'InceptionV3': 249, 'ResNet50': 143, 'EfficientNetB0': 180}
-        unfreeze_from = unfreeze_map.get(model_name, len(model.layers))
+        # Descongelar as camadas
+        if model_name != 'Custom_CNN':
+            
 
-        # Descongela as camadas do modelo base para Fine-Tuning
-        for layer in model.layers[1:]: # Ignora a camada de Rescaling
-            layer.trainable = True
-        for layer in model.layers[:unfreeze_from]:
-            layer.trainable = False
+            num_layers = len(model.layers)
+            
+            # 1. Garante que todas as camadas do modelo base estejam treináveis, 
+            # e a lógica abaixo define quem fica congelado ou não.
+            for layer in model.layers:
+                layer.trainable = True
+
+            # 2. Aplica a lógica de congelamento/descongelamento:
+            if unfreeze_layers_count > 0:
+                # Descongelar N camadas do final (VGG16 padrão)
+                layers_unfrozen = unfreeze_layers_count
+                # As camadas já estão trainables=True, esta lógica é mais simples
+            
+            elif unfreeze_layers_count < 0:
+                # Descongelar tudo, EXCETO as N primeiras camadas (ResNet50/EfficientNet)
+                layers_to_keep_frozen = abs(unfreeze_layers_count)
+                
+                # Congela as N primeiras camadas (o "núcleo" da extração de features)
+                for layer in model.layers[:layers_to_keep_frozen]:
+                    layer.trainable = False
+                
+                # As camadas restantes (corpo principal do ResNet50) permanecem True
+                layers_unfrozen = num_layers - layers_to_keep_frozen
+            
+            else:
+                # Caso unfreeze_layers_count == 0 ou valor inválido
+                layers_unfrozen = 0
+                for layer in model.layers:
+                    layer.trainable = False
+
+            print(f"✅ Camadas descongeladas para Fine-Tuning: {layers_unfrozen} de {num_layers} camadas totais.")
         
-        # Recompilação com LR menor
+        
+        #Usa o LR de Fine-Tuning configurado (fine_tune_lr), se existir
+        # Se não existir (como no Custom_CNN), usa o padrão (initial_lr * 0.1)
+        finetune_lr = config.get('fine_tune_lr', initial_lr * 0.1) 
+        
+        # Compilação da Fase 2 (Novo Learning Rate mais baixo)
         model.compile(
-            optimizer=Adam(learning_rate=1e-5), # LR 10x menor para Fine-Tuning
-            loss='categorical_crossentropy',
+            optimizer=tf.keras.optimizers.Adam(learning_rate=finetune_lr),
+            loss=tf.keras.losses.CategoricalCrossentropy(),
             metrics=['accuracy']
         )
-        
-        start_time_finetune = time.time()
-        model.fit(
-            train_ds, epochs=epochs_finetune, validation_data=val_ds,
-            class_weight=class_weights, callbacks=callbacks, verbose=1
-        )
-        total_training_time += (time.time() - start_time_finetune)
 
-    elif model_name == 'Custom_CNN':
-        # Treinamento único para CNN customizada
-        epochs = epochs_transfer + epochs_finetune
-        print(f"\n--- {model_name}: Treinamento Único (Total de {epochs} épocas) ---")
-        model.compile(
-            optimizer=Adam(learning_rate=1e-4),
-            loss='categorical_crossentropy',
-            metrics=['accuracy']
+        # Treinamento da Fase 2
+        history_finetune = model.fit(
+            train_ds,
+            epochs=epochs_finetune,
+            validation_data=val_ds,
+            callbacks=callbacks_list,
+            class_weight=class_weights,
+            verbose=1
         )
-        start_time_cnn = time.time()
-        model.fit(
-            train_ds, epochs=epochs, validation_data=val_ds,
-            class_weight=class_weights, callbacks=callbacks, verbose=1
-        )
-        total_training_time = (time.time() - start_time_cnn)
         
-    return model, total_training_time
+        # Mesclar históricos
+        if history:
+             for key in history_finetune.history.keys():
+                 history.history[key].extend(history_finetune.history[key])
+        else:
+            history = history_finetune
+            
+    total_time = time.time() - start_time
+    print(f"\n⏱️ Tempo Total de Treino ({model_name}): {total_time:.2f} segundos")
+
+    return model, total_time, history
+
 
 def _run_training(model_name, model_builder_func, train_ds, val_ds, class_weights, model_params, final_model_path):
-    """ Função auxiliar para construir, treinar e salvar o modelo. """
+    """ 
+    Função auxiliar para construir, treinar e salvar o modelo.
+    Inclui a correção de carregamento manual de pesos para EfficientNetB0.
+    """
     
-    clean_session() # Garante um ambiente limpo
+    clean_session() 
     
     # 1. Construir o modelo
     model = model_builder_func(**model_params)
+
+    weights_path = None # Inicializa weights_path
     
+    # 1.1. Carregamento manual para EfficientNetB0 e outros com pesos ImageNet
+    if model_name in ['EfficientNetB0', 'VGG16', 'InceptionV3', 'ResNet50']:
+        print(f"🔧 Aplicando correção de canal: Carregando pesos {model_name} ImageNet manualmente...")
+        
+        # Mapeamento para obter os pesos notop corretos
+        WEIGHTS_MAP = {
+            'EfficientNetB0': 'https://storage.googleapis.com/keras-applications/efficientnetb0_notop.h5',
+            'VGG16': 'https://storage.googleapis.com/tensorflow/keras-applications/vgg16/vgg16_weights_tf_dim_ordering_tf_kernels_notop.h5',
+            'InceptionV3': 'https://storage.googleapis.com/tensorflow/keras-applications/inception_v3/inception_v3_weights_tf_dim_ordering_tf_kernels_notop.h5',
+            'ResNet50': 'https://storage.googleapis.com/tensorflow/keras-applications/resnet/resnet50_weights_tf_dim_ordering_tf_kernels_notop.h5'
+        }
+        
+        weights_url = WEIGHTS_MAP.get(model_name)
+        weights_filename = os.path.basename(weights_url)
+        
+        weights_path = get_file(
+            weights_filename,
+            weights_url,
+            cache_subdir='models',
+        )
+        
+        # Carrega os pesos ImageNet no modelo recém-criado 
+        try:
+            model.load_weights(weights_path, by_name=True, skip_mismatch=True)
+            print("✅ Pesos ImageNet carregados com sucesso (manual).")
+        except Exception as e:
+             print(f"❌ Erro ao carregar pesos ImageNet para {model_name}: {e}")
+
     # 2. Treinar o modelo
-    if model_name == 'Custom_CNN':
-         trained_model, total_time = train_model(
-            model, train_ds, val_ds, class_weights, model_name, epochs_transfer=0, epochs_finetune=25
-        )
-    else:
-        trained_model, total_time = train_model(
-            model, train_ds, val_ds, class_weights, model_name, epochs_transfer=10, epochs_finetune=15
-        )
+    trained_model, total_time, history = train_model(
+        model, 
+        train_ds, 
+        val_ds, 
+        class_weights, 
+        model_name, 
+    )
 
     # 3. Carregar os melhores pesos salvos pelo ModelCheckpoint durante o treino
-    best_weights_path = f'{model_name}_best_model.h5'
-    try:
-        trained_model.load_weights(best_weights_path)
-    except Exception as e:
-        print(f"⚠️ Aviso: Não foi possível carregar os melhores pesos do ModelCheckpoint para salvar em {model_name}. Usando o modelo final da FASE 2. Erro: {e}")
+    best_weights_path = f'{model_name}_best_model.weights.h5'
 
-    # 4. Salvar o modelo final treinado no caminho de cache (Modelo Completo)
+    # 4. Salvar o modelo final treinado no caminho de cache
     print(f"💾 Salvando modelo final '{model_name}' em: {final_model_path}")
-    trained_model.save(final_model_path)
+
+    if model_name in ['EfficientNetB0', 'VGG16', 'ResNet50', 'InceptionV3']:
+        trained_model.save_weights(final_model_path)
+        print(f"     (Apenas pesos salvos para modelos Transfer Learning.)")
+    else:
+        # Salva o modelo COMPLETO (arquitetura + pesos) para Custom_CNN
+        trained_model.save(final_model_path)
     
-    # 5. Opcional: Remover o arquivo de checkpoint temporário
+    # 5. Remover o arquivo de checkpoint temporário
     if os.path.exists(best_weights_path):
         os.remove(best_weights_path)
         
-    return trained_model, total_time
+    return trained_model, total_time, history
 
 
 def load_or_train_model(model_name, model_builder_func, train_ds, val_ds, class_weights, model_params):
@@ -255,54 +354,63 @@ def load_or_train_model(model_name, model_builder_func, train_ds, val_ds, class_
     Tenta carregar o modelo de cache. Se não existir, treina, salva na pasta MODELS_DIR e retorna.
     """
     
-    # 1. Definir o caminho completo do modelo no diretório 'Modelos'
     model_dir = os.path.join(MODELS_DIR, model_name)
     model_path = os.path.join(model_dir, f'{model_name}_final_model.h5')
     
-    # Garantir que a pasta de destino exista
     os.makedirs(model_dir, exist_ok=True)
     
     trained_model = None
     total_time = 0.0
+    history = None
     
     # 2. Verificar se o modelo já existe (cache)
     if os.path.exists(model_path):
         print(f"✅ Modelo '{model_name}' encontrado em cache. Carregando para avaliação...")
         
         try:
-            # Carrega o modelo COMPLETO (arquitetura + pesos + otimizador)
-            trained_model = tf.keras.models.load_model(model_path)
-            # O tempo de treino é 0.0 se for carregado do cache
+            if model_name in ['EfficientNetB0', 'VGG16', 'ResNet50', 'InceptionV3']:
+                # 🚨 Carregamento Pontual: Reconstrua e carregue apenas os pesos.
+                clean_session() 
+                trained_model = model_builder_func(**model_params)
+                
+                # Tenta carregar os pesos, se falhar o try/except cai no re-treino
+                trained_model.load_weights(model_path)
+                config = MODEL_CONFIGS.get(model_name, MODEL_CONFIGS['VGG16'])
+                finetune_lr = config.get('fine_tune_lr', config['initial_lr'] * 0.1) 
+                trained_model.compile(
+                    optimizer=tf.keras.optimizers.Adam(learning_rate=finetune_lr),
+                    loss=tf.keras.losses.CategoricalCrossentropy(),
+                    metrics=['accuracy']
+                )
+
+            else:
+                # Carrega o modelo COMPLETO (Custom_CNN)
+                trained_model = tf.keras.models.load_model(model_path)
             
         except Exception as e:
+            # ERRO DE ARQUITETURA/PESOS/SERIALIZAÇÃO - Forçar novo treino
             print(f"❌ Erro ao carregar o modelo em cache '{model_path}': {e}. Iniciando novo treino...")
-            # Se falhar, limpa a sessão e tenta treinar
             clean_session() 
-            trained_model, total_time = _run_training(model_name, model_builder_func, train_ds, val_ds, class_weights, model_params, model_path)
+            trained_model, total_time, history = _run_training(model_name, model_builder_func, train_ds, val_ds, class_weights, model_params, model_path)
             
     else:
         print(f"🔥 Modelo '{model_name}' não encontrado. Iniciando Treinamento...")
-        trained_model, total_time = _run_training(model_name, model_builder_func, train_ds, val_ds, class_weights, model_params, model_path)
+        trained_model, total_time, history = _run_training(model_name, model_builder_func, train_ds, val_ds, class_weights, model_params, model_path)
         
-    return trained_model, total_time
+    return trained_model, total_time, history
 
 
-def evaluate_model(model, test_ds, model_name, total_training_time,class_names):
+def evaluate_model(model, test_ds, model_name, total_training_time,class_names,history=None):
     """
     Avalia o modelo treinado, gera métricas e o relatório de classificação usando tf.data.Dataset.
-    Nota: Se o modelo veio do cache, os pesos já estão nele. Se veio do treino, os melhores pesos 
-    (salvos pelo ModelCheckpoint) foram carregados na função _run_training antes de salvar.
     """
     
     print(f"\n📊 Avaliando {model_name} no Conjunto de Teste...")
     metrics_zeroed = {k: 0 for k in ['Acurácia Teste (%)', 'Precision (Weighted Avg)', 'Recall (Weighted Avg)', 'F1-Score (Weighted Avg)', 'Tempo de Treinamento (s)', 'Tamanho do Modelo (MB)']}
     
-    # Obtém o caminho do modelo salvo (dentro da pasta Modelos)
     model_dir = os.path.join(MODELS_DIR, model_name)
     model_path = os.path.join(model_dir, f'{model_name}_final_model.h5')
 
-    # Se a avaliação ocorrer logo após o treino, o arquivo de checkpoint temporário
-    # já foi removido, mas o modelo final está salvo em model_path.
     if not os.path.exists(model_path):
         print(f"❌ Erro: Arquivo de modelo final esperado em {model_path} não encontrado.")
         return metrics_zeroed
@@ -313,26 +421,24 @@ def evaluate_model(model, test_ds, model_name, total_training_time,class_names):
 
     # Obter rótulos reais do test_ds
     true_classes_list = []
-    class_labels_dict = class_names
     
     for _, batch_labels in test_ds.unbatch().as_numpy_iterator():
         true_classes_list.append(np.argmax(batch_labels)) 
     
     true_classes = np.array(true_classes_list)
-    class_labels = class_labels_dict
+    class_labels = class_names
 
-    # Truncar o predito se os tamanhos forem diferentes
+    # Truncar o predito se os tamanhos forem diferentes (caso raro)
     if len(predicted_classes) != len(true_classes):
         print("⚠️ Aviso: Os rótulos previstos e reais têm tamanhos diferentes. Ajustando para o menor tamanho.")
         min_len = min(len(predicted_classes), len(true_classes))
         predicted_classes = predicted_classes[:min_len]
         true_classes = true_classes[:min_len]
 
-
     # Relatório de Classificação
     report_dict = classification_report(true_classes, predicted_classes, target_names=class_labels, output_dict=True, zero_division=0)
 
-    # Obter o tamanho do modelo salvo em MB (Agora do caminho de cache)
+    # Obter o tamanho do modelo salvo em MB
     model_size_mb = os.path.getsize(model_path) / (1024 * 1024)
 
     print(f"\n⏱️ Tempo Total de Treino ({model_name}): {total_training_time:.2f} segundos")
@@ -348,4 +454,77 @@ def evaluate_model(model, test_ds, model_name, total_training_time,class_names):
         'Tempo de Treinamento (s)': total_training_time,
         'Tamanho do Modelo (MB)': model_size_mb
     }
+
+    # A. Salvar Matriz de Confusão
+    plot_and_save_confusion_matrix(true_classes, predicted_classes, class_names, model_name)
+    
+    # B. Salvar Gráficos de Histórico (se o modelo foi treinado, não carregado do cache)
+    if history is not None:
+        plot_and_save_history_metrics(history, model_name)
+
     return metrics
+
+# ===================================================================
+# 4. FUNÇÕES DE PLOTAGEM E GERAÇÃO DE GRÁFICOS
+# ===================================================================
+
+def plot_and_save_history_metrics(history, model_name):
+    """Gera e salva gráficos de Acurácia e Perda (Loss) por época."""
+    
+    plot_dir = os.path.join(PLOTS_DIR, model_name)
+    os.makedirs(plot_dir, exist_ok=True)
+    
+    epochs = range(1, len(history.history['accuracy']) + 1)
+    
+    # --- Gráfico de Acurácia ---
+    plt.figure(figsize=(10, 6))
+    plt.plot(epochs, history.history['accuracy'], label='Acurácia de Treinamento')
+    plt.plot(epochs, history.history['val_accuracy'], label='Acurácia de Validação')
+    plt.title(f'Acurácia de Treinamento e Validação - {model_name}')
+    plt.xlabel('Época')
+    plt.ylabel('Acurácia')
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(os.path.join(plot_dir, f'{model_name}_Acuracia_Historico.png'))
+    plt.close()
+
+    # --- Gráfico de Perda (Loss) ---
+    plt.figure(figsize=(10, 6))
+    plt.plot(epochs, history.history['loss'], label='Perda de Treinamento')
+    plt.plot(epochs, history.history['val_loss'], label='Perda de Validação')
+    plt.title(f'Perda de Treinamento e Validação - {model_name}')
+    plt.xlabel('Época')
+    plt.ylabel('Perda (Loss)')
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(os.path.join(plot_dir, f'{model_name}_Perda_Historico.png'))
+    plt.close()
+    print(f"🖼️ Gráficos de Histórico salvos em: {plot_dir}")
+
+
+def plot_and_save_confusion_matrix(true_classes, predicted_classes, class_names, model_name):
+    """Gera e salva a Matriz de Confusão."""
+    
+    plot_dir = os.path.join(PLOTS_DIR, model_name)
+    os.makedirs(plot_dir, exist_ok=True)
+
+    cm = confusion_matrix(true_classes, predicted_classes)
+    
+    plt.figure(figsize=(14, 12))
+    sns.heatmap(
+        cm, 
+        annot=True, 
+        fmt="d", 
+        cmap="Blues",
+        xticklabels=class_names, 
+        yticklabels=class_names
+    )
+    plt.title(f'Matriz de Confusão - {model_name}')
+    plt.ylabel('Rótulo Verdadeiro')
+    plt.xlabel('Rótulo Predito')
+    plt.tight_layout()
+    plt.savefig(os.path.join(plot_dir, f'{model_name}_Matriz_Confusao.png'))
+    plt.close()
+    print(f"🖼️ Matriz de Confusão salva em: {plot_dir}")

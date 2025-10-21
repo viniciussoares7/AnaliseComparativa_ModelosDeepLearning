@@ -16,7 +16,7 @@ DATASET_BASE_PATH = "Jute_Pest_Dataset"
 # Dimensões e Parâmetros
 STANDARD_IMAGE_SIZE = (224, 224) 
 INCEPTION_IMAGE_SIZE = (299, 299)
-BATCH_SIZE = 16
+BATCH_SIZE = 8
 NUM_CLASSES = 17 
 SEED = 42
 
@@ -25,6 +25,53 @@ TRAIN_DIR = os.path.join(DATASET_BASE_PATH, 'train')
 VALIDATION_DIR = os.path.join(DATASET_BASE_PATH, 'val')
 TEST_DIR = os.path.join(DATASET_BASE_PATH, 'test')
 MODELS_DIR = 'Modelos'
+PLOTS_DIR = 'Resultados/Graficos'
+
+MODEL_CONFIGS = {
+    # --- MODELOS MAIS ANTIGOS/SIMPLES ---
+    'VGG16': {
+        'initial_lr': 1e-4,  # LR um pouco mais cauteloso
+        'epochs_transfer': 15,
+        'epochs_finetune': 20,
+        'unfreeze_layers_count': 15, # Descongelar mais camadas (são redes mais simples)
+        'patience': 10,
+    },
+
+    'ResNet50': { 
+        'initial_lr': 1e-4,          # Manter o LR da Fase 1
+        'epochs_transfer': 10,       # Manter as épocas da Fase 1
+        'fine_tune_lr': 5e-6,        # LR reduzido para a Fase 2
+        'epochs_finetune': 30,       # Mais épocas para convergência lenta
+        'patience': 10,              # Mais paciência para ReduceLROnPlateau
+        'unfreeze_layers_count': -20 # Descongelar todas as camadas, exceto as 20 primeiras
+    },
+    
+    'EfficientNetB0': {
+        # O EfficientNet é muito sensível. LR inicial deve ser BEM baixo.
+        'initial_lr': 1e-4,
+        'epochs_transfer': 10, # Manter
+        'epochs_finetune': 15,
+        'unfreeze_layers_count': 0, # Descongelar mais camadas, pois B0 é menor
+        'patience': 5,
+    },
+    'InceptionV3': {
+        # Inception usa dimensões maiores e tem uma estrutura mais profunda
+        'initial_lr': 1e-3, 
+        'epochs_transfer': 10,
+        'epochs_finetune': 15,
+        'unfreeze_layers_count': 50, # Descongelar camadas mais profundas
+        'patience': 10,
+    },
+    
+    # --- SEU MODELO CUSTOMIZADO ---
+   'Custom_CNN': { 
+    'initial_lr': 1e-4, 
+    'epochs_transfer': 0,
+    'epochs_finetune': 75,
+    'patience': 10,
+    'unfreeze_layers_count': 10, 
+}
+}
 
 # Camada de pré-processamento (Normaliza de [0, 255] para [0, 1])
 #RESCALE_LAYER = layers.Rescaling(1./255) 
@@ -123,12 +170,9 @@ def calculate_class_weights(dataset, num_classes=NUM_CLASSES):
         y=train_labels
     )
     
-    # >> CORREÇÃO APLICADA AQUI: Converte explicitamente o valor para float nativo
     class_weights = {i: float(weights[i]) for i in range(len(weights))}
     
     return class_weights
 
 # O resto do seu código de inicialização:
 CLASS_WEIGHTS = calculate_class_weights(train_dataset_init)
-print("\n--- Pesos de Classe Calculados (class_weight) ---")
-print(CLASS_WEIGHTS)
