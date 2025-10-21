@@ -38,8 +38,7 @@ def main():
     print("--------------------------------------------------")
 
 
-    #model_names = ['VGG16', 'InceptionV3', 'ResNet50', 'EfficientNetB0', 'Custom_CNN']
-    model_names = ['ResNet50','Custom_CNN']
+    model_names = ['VGG16', 'InceptionV3', 'ResNet50', 'EfficientNetB0', 'Custom_CNN']
 
     all_results = {}
 
@@ -97,25 +96,36 @@ def main():
         final_df = final_df.rename_axis('Algoritmos').reset_index()
         final_df.loc[final_df['Algoritmos'] == 'Custom_CNN', 'Algoritmos'] = 'CNN Personalizada'
 
-        # Usa tabulate para melhor formatação (especialmente para os floats)
-        print(tabulate(
-            final_df, 
-            headers='keys', 
-            tablefmt="pipe",
-            showindex=False,
-            numalign="decimal", # Ajuda a garantir que todos os números sejam tratados como tal
-            floatfmt={
-                None: ".2f", # <-- Adicionado formato padrão para qualquer float não listado
-                'Acurácia Teste (%)': ".0f",
-                'Precision (Weighted Avg)': ".4f",
-                  'Recall (Weighted Avg)': ".4f",
-                  'F1-Score (Weighted Avg)': ".4f",
-                  'Tempo de Treinamento (s)': ".2f",
-                  'Tamanho do Modelo (MB)': ".2f"
-                }
-                ))
+        print(final_df)
+
     else:
         print("\nNenhum modelo foi treinado ou avaliado com sucesso.")
+"""
+        # --- DEBUG: INSPEÇÃO DE DADOS ---
+        print("\n--- DADOS FINAIS BRUTOS PARA TABULATE ---")
+        print(final_df.to_dict(orient='records')) # Imprime o DataFrame como uma lista de dicionários
+        print("--- TIPOS DE COLUNAS ---")
+        print(final_df.dtypes)
+        # --------------------------------
+
+        # Usa tabulate para melhor formatação (especialmente para os floats)
+        print(tabulate(
+        final_df, 
+        headers='keys', 
+        tablefmt="pipe",
+        showindex=False,
+        # REMOVIDA: numalign="decimal" <--- Esta é a linha que estava causando conflito
+        floatfmt={
+            'Acurácia Teste (%)': ".0f",
+            'Precision (Weighted Avg)': ".4f",
+            'Recall (Weighted Avg)': ".4f",
+            'F1-Score (Weighted Avg)': ".4f",
+            'Tempo de Treinamento (s)': ".2f",
+            'Tamanho do Modelo (MB)': ".2f"
+            # O formato para 'None' não é necessário se você especificou todos os cabeçalhos numéricos.
+        }
+    ))
+"""
 
 if __name__ == "__main__":
     main()
